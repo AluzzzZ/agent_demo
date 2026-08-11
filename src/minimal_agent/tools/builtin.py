@@ -5,6 +5,8 @@ import operator
 from typing import Any
 
 from .registry import ToolContext, ToolDefinition, ToolRegistry
+from .search import SearchProvider, WikipediaSearchProvider
+from .weather import OpenMeteoWeatherProvider, WeatherProvider
 
 
 _BINARY_OPS = {
@@ -49,81 +51,6 @@ def calculator(arguments: dict[str, Any], _: ToolContext) -> dict[str, Any]:
     return {"expression": expression, "result": result}
 
 
-_SEARCH_DOCUMENTS = [
-    {
-        "title": "Agent Loop 设计笔记",
-        "snippet": "模型决定调用工具或结束，Runtime 负责执行并回填结果。",
-        "url": "mock://docs/agent-loop",
-        "keywords": "agent loop runtime 工具 循环",
-    },
-    {
-        "title": "Session 隔离指南",
-        "snippet": "使用 user_id 与 session_id 复合键隔离窗口状态。",
-        "url": "mock://docs/session-isolation",
-        "keywords": "session 会话 窗口 sqlite 隔离",
-    },
-    {
-        "title": "Context 压缩策略",
-        "snippet": "保留最近消息，将较早历史压缩为结构化摘要。",
-        "url": "mock://docs/context-compaction",
-        "keywords": "context 上下文 压缩 summary memory",
-    },
-    {
-        "title": "工具注册机制",
-        "snippet": "工具包含名称、描述、JSON Schema 与执行函数。",
-        "url": "mock://docs/tool-registry",
-        "keywords": "tool schema registry 注册 json",
-    },
-]
-
-
-def search(arguments: dict[str, Any], _: ToolContext) -> dict[str, Any]:
-    query = arguments["query"].strip().lower()
-    limit = arguments.get("limit", 3)
-    tokens = [token for token in query.replace("-", " ").split() if token]
-    scored: list[tuple[int, dict[str, str]]] = []
-    for document in _SEARCH_DOCUMENTS:
-        haystack = " ".join(document.values()).lower()
-        score = sum(token in haystack for token in tokens)
-        if score:
-            scored.append((score, document))
-    scored.sort(key=lambda item: (-item[0], item[1]["title"]))
-    selected = scored[:limit] or [(0, item) for item in _SEARCH_DOCUMENTS[:limit]]
-    return {
-        "query": arguments["query"],
-        "mock": True,
-        "results": [
-            {key: value for key, value in document.items() if key != "keywords"}
-            for _, document in selected
-        ],
-    }
-
-
-_WEATHER = {
-    "上海": {"today": (30, "多云", 65), "tomorrow": (31, "阵雨", 72)},
-    "北京": {"today": (28, "晴", 38), "tomorrow": (29, "晴转多云", 41)},
-    "深圳": {"today": (32, "雷阵雨", 78), "tomorrow": (31, "中雨", 82)},
-}
-
-
-def weather(arguments: dict[str, Any], _: ToolContext) -> dict[str, Any]:
-    city = arguments["city"].strip()
-    day = arguments.get("day", "today")
-    city_data = _WEATHER.get(city)
-    if city_data is None:
-        # Stable mock fallback keeps demos deterministic for arbitrary cities.
-        city_data = {"today": (26, "多云", 55), "tomorrow": (27, "晴", 50)}
-    temperature, condition, humidity = city_data[day]
-    return {
-        "city": city,
-        "day": day,
-        "temperature_c": temperature,
-        "condition": condition,
-        "humidity_percent": humidity,
-        "mock": True,
-    }
-
-
 def todo(arguments: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     action = arguments["action"]
     if action == "add":
@@ -143,7 +70,13 @@ def todo(arguments: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     raise ValueError(f"unsupported todo action: {action}")
 
 
-def create_default_registry() -> ToolRegistry:
+def create_default_registry(
+    *,
+    search_provider: SearchProvider | None = None,
+    weather_provider: WeatherProvider | None = None,
+) -> ToolRegistry:
+    search_backend = search_provider or WikipediaSearchProvider()
+    weather_backend = weather_provider or OpenMeteoWeatherProvider()
     registry = ToolRegistry()
     registry.register(
         ToolDefinition(
@@ -161,23 +94,34 @@ def create_default_registry() -> ToolRegistry:
     registry.register(
         ToolDefinition(
             name="search",
-            description="搜索本地 mock 文档，返回确定性的标题、摘要和地址。",
+            description=(
+                "使用免费的 Wikipedia/MediaWiki API 搜索百科知识，返回标题、摘要和地址。"
+                "它不覆盖整个互联网；需要百科事实或背景资料时使用。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "minLength": 1},
+                    "query": {"type": "string", "minLength": 1, "maxLength": 500},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "language": {"type": "string", "enum": ["zh", "en"]},
                 },
                 "required": ["query"],
                 "additionalProperties": False,
             },
-            handler=search,
+            handler=lambda arguments, _: search_backend.search(
+                arguments["query"].strip(),
+                limit=arguments.get("limit", 3),
+                language=arguments.get("language", "zh"),
+            ),
         )
     )
     registry.register(
         ToolDefinition(
             name="weather",
-            description="查询城市今天或明天的 mock 天气，适合稳定演示和测试。",
+            description=(
+                "使用免费的 Open-Meteo API 查询城市今天或明天的真实天气预报。"
+                "结果包含最高/最低温度、天气状况和最大降水概率。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -187,7 +131,9 @@ def create_default_registry() -> ToolRegistry:
                 "required": ["city"],
                 "additionalProperties": False,
             },
-            handler=weather,
+            handler=lambda arguments, _: weather_backend.forecast(
+                arguments["city"].strip(), day=arguments.get("day", "today")
+            ),
         )
     )
     registry.register(
@@ -211,4 +157,3 @@ def create_default_registry() -> ToolRegistry:
         )
     )
     return registry
-

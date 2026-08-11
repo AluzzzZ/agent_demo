@@ -70,3 +70,30 @@ class RepeatingToolLLM:
     def summarize(self, *, previous_summary: str, transcript: str) -> str:
         return "summary"
 
+
+class FakeSearchProvider:
+    def search(self, query: str, *, limit: int = 3, language: str = "zh") -> dict:
+        return {
+            "provider": "fake-search",
+            "language": language,
+            "query": query,
+            "results": [
+                {
+                    "title": "Session 隔离指南",
+                    "snippet": "使用 user_id 与 session_id 复合键隔离窗口状态。",
+                    "url": "https://example.test/session",
+                }
+            ][:limit],
+        }
+
+
+class FakeWeatherProvider:
+    def forecast(self, city: str, *, day: str = "today") -> dict:
+        temperature = 31 if day == "tomorrow" else 30
+        return {
+            "provider": "fake-weather",
+            "city": city,
+            "day": day,
+            "temperature_c": temperature,
+            "condition": "阵雨" if day == "tomorrow" else "多云",
+        }

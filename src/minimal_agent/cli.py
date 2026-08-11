@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 
+from .env import load_project_env
 from .llm import AnthropicLLM, DashScopeLLM
 from .runtime import AgentRuntime
 from .storage import SessionStore
@@ -45,6 +46,7 @@ def build_llm(args):
 
 
 def main() -> None:
+    load_project_env()
     args = build_parser().parse_args()
     runtime = AgentRuntime(
         llm=build_llm(args),

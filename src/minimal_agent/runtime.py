@@ -96,6 +96,14 @@ class AgentRuntime:
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                 )
+                self.tracer.record(
+                    trace_id=trace_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    event="request_failed",
+                    iteration=iteration,
+                    error_type=type(exc).__name__,
+                )
                 raise
 
             self.store.append_message(
@@ -161,4 +169,3 @@ class AgentRuntime:
             exit_reason="max_iterations",
         )
         return AgentResult(answer, trace_id, self.max_iterations, "max_iterations")
-

@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from jsonschema import Draft202012Validator
 
+from ..errors import AgentToolError
 from ..storage import SessionStore
 from ..tracing import TraceRecorder
 
@@ -94,25 +95,48 @@ class ToolRegistry:
             call_id=call_id,
             arguments=arguments,
         )
-        try:
-            definition = self._tools.get(name)
-            if definition is None:
-                raise ValueError(f"unknown tool: {name}")
+        definition = self._tools.get(name)
+        error_payload: dict[str, Any] | None = None
+        if definition is None:
+            error_payload = {
+                "error_code": "tool_unknown",
+                "message": f"unknown tool: {name}",
+                "retryable": False,
+            }
+        else:
             errors = sorted(
                 Draft202012Validator(definition.input_schema).iter_errors(arguments),
                 key=lambda error: list(error.path),
             )
             if errors:
                 details = "; ".join(error.message for error in errors)
-                raise ValueError(f"invalid arguments: {details}")
-            output = definition.handler(arguments, context)
-            content = json.dumps(output, ensure_ascii=False, default=str)
-            execution = ToolExecution(call_id, name, content, False)
-            status = "success"
-        except Exception as exc:  # tools must return failures to the model, not crash the loop
-            content = json.dumps(
-                {"error": type(exc).__name__, "message": str(exc)}, ensure_ascii=False
-            )
+                error_payload = {
+                    "error_code": "tool_invalid_arguments",
+                    "message": f"invalid arguments: {details}",
+                    "retryable": False,
+                }
+
+        if error_payload is None and definition is not None:
+            try:
+                output = definition.handler(arguments, context)
+                content = json.dumps(output, ensure_ascii=False, default=str)
+                execution = ToolExecution(call_id, name, content, False)
+                status = "success"
+            except AgentToolError as exc:
+                error_payload = {
+                    "error_code": exc.code,
+                    "message": exc.safe_message,
+                    "retryable": exc.retryable,
+                }
+            except Exception:
+                error_payload = {
+                    "error_code": "tool_execution_error",
+                    "message": "工具执行失败，请稍后重试。",
+                    "retryable": False,
+                }
+
+        if error_payload is not None:
+            content = json.dumps(error_payload, ensure_ascii=False)
             execution = ToolExecution(call_id, name, content, True)
             status = "error"
 
@@ -127,5 +151,6 @@ class ToolRegistry:
             duration_ms=round((time.perf_counter() - started) * 1000, 3),
             status=status,
             is_error=execution.is_error,
+            error_code=(error_payload["error_code"] if error_payload else None),
         )
         return execution

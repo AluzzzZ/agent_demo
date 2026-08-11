@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
+import secrets
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -37,6 +41,7 @@ class SessionStore:
                 CREATE TABLE IF NOT EXISTS sessions (
                     user_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '新对话',
                     summary TEXT NOT NULL DEFAULT '',
                     summary_through_message_id INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -71,25 +76,101 @@ class SessionStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_todos_session
                     ON todos(user_id, session_id, id);
+
+                CREATE TABLE IF NOT EXISTS app_users (
+                    user_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    password_salt TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS auth_tokens (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    expires_at_epoch INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_auth_tokens_user
+                    ON auth_tokens(user_id, expires_at_epoch);
                 """
             )
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "title" not in columns:
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT '新对话'"
+                )
+            conn.execute("PRAGMA optimize")
 
     @staticmethod
     def _validate_key(value: str, label: str) -> None:
         if not value or len(value) > 128:
             raise ValueError(f"{label} must contain 1-128 characters")
 
-    def ensure_session(self, user_id: str, session_id: str) -> None:
+    def ensure_session(
+        self, user_id: str, session_id: str, *, title: str = "新对话"
+    ) -> None:
         self._validate_key(user_id, "user_id")
         self._validate_key(session_id, "session_id")
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO sessions(user_id, session_id) VALUES (?, ?)
+                INSERT INTO sessions(user_id, session_id, title) VALUES (?, ?, ?)
                 ON CONFLICT(user_id, session_id) DO UPDATE SET
                     updated_at = CURRENT_TIMESTAMP
                 """,
+                (user_id, session_id, title.strip()[:80] or "新对话"),
+            )
+
+    def session_exists(self, user_id: str, session_id: str) -> bool:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM sessions WHERE user_id = ? AND session_id = ?",
                 (user_id, session_id),
+            ).fetchone()
+        return row is not None
+
+    def delete_session(self, user_id: str, session_id: str) -> bool:
+        self._validate_key(user_id, "user_id")
+        self._validate_key(session_id, "session_id")
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM sessions WHERE user_id = ? AND session_id = ?",
+                (user_id, session_id),
+            )
+        return cursor.rowcount > 0
+
+    def list_sessions(self, user_id: str) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT s.session_id, s.title, s.created_at, s.updated_at,
+                       COUNT(m.id) AS message_count
+                FROM sessions AS s
+                LEFT JOIN messages AS m
+                  ON m.user_id = s.user_id AND m.session_id = s.session_id
+                WHERE s.user_id = ?
+                GROUP BY s.user_id, s.session_id
+                ORDER BY s.updated_at DESC, s.session_id DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_session_title(self, user_id: str, session_id: str, title: str) -> None:
+        clean = " ".join(title.split())[:80] or "新对话"
+        with self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE sessions SET title = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND session_id = ?
+                """,
+                (clean, user_id, session_id),
             )
 
     def append_message(
@@ -218,3 +299,105 @@ class SessionStore:
             ).fetchone()
         return dict(row)
 
+    def seed_user(
+        self,
+        *,
+        user_id: str,
+        username: str,
+        password: str,
+        display_name: str,
+    ) -> None:
+        self._validate_key(user_id, "user_id")
+        clean_username = username.strip()
+        if not clean_username or len(clean_username) > 64:
+            raise ValueError("username must contain 1-64 characters")
+        if len(password) < 6 or len(password) > 256:
+            raise ValueError("password must contain 6-256 characters")
+        clean_display_name = display_name.strip()[:80] or clean_username
+        salt = secrets.token_bytes(16)
+        password_hash = _derive_password_hash(password, salt)
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_users(
+                    user_id, username, display_name, password_salt, password_hash
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    display_name = excluded.display_name,
+                    password_salt = excluded.password_salt,
+                    password_hash = excluded.password_hash,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (user_id, clean_username, clean_display_name, salt.hex(), password_hash),
+            )
+
+    def authenticate_user(self, username: str, password: str) -> dict[str, str] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT user_id, username, display_name, password_salt, password_hash
+                FROM app_users WHERE username = ?
+                """,
+                (username.strip(),),
+            ).fetchone()
+        if row is None:
+            return None
+        actual = _derive_password_hash(password, bytes.fromhex(row["password_salt"]))
+        if not hmac.compare_digest(actual, row["password_hash"]):
+            return None
+        return {
+            "user_id": row["user_id"],
+            "username": row["username"],
+            "display_name": row["display_name"],
+        }
+
+    def create_auth_token(self, user_id: str, *, ttl_seconds: int = 86_400) -> str:
+        token = secrets.token_urlsafe(32)
+        token_hash = _token_hash(token)
+        expires_at = int(time.time()) + max(ttl_seconds, 60)
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM auth_tokens WHERE expires_at_epoch <= ?", (int(time.time()),)
+            )
+            conn.execute(
+                """
+                INSERT INTO auth_tokens(token_hash, user_id, expires_at_epoch)
+                VALUES (?, ?, ?)
+                """,
+                (token_hash, user_id, expires_at),
+            )
+        return token
+
+    def resolve_auth_token(self, token: str) -> dict[str, str] | None:
+        if not token:
+            return None
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT u.user_id, u.username, u.display_name
+                FROM auth_tokens AS t
+                JOIN app_users AS u ON u.user_id = t.user_id
+                WHERE t.token_hash = ? AND t.expires_at_epoch > ?
+                """,
+                (_token_hash(token), int(time.time())),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def revoke_auth_token(self, token: str) -> None:
+        if not token:
+            return
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM auth_tokens WHERE token_hash = ?", (_token_hash(token),)
+            )
+
+
+def _derive_password_hash(password: str, salt: bytes) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, 200_000
+    ).hex()
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()

@@ -7,6 +7,8 @@ from minimal_agent.storage import SessionStore
 from minimal_agent.tools import create_default_registry
 from minimal_agent.tracing import TraceRecorder
 
+from .fakes import FakeSearchProvider, FakeWeatherProvider
+
 
 @pytest.fixture
 def runtime_factory(tmp_path):
@@ -16,11 +18,13 @@ def runtime_factory(tmp_path):
         runtime = AgentRuntime(
             llm=llm,
             store=store,
-            tools=create_default_registry(),
+            tools=create_default_registry(
+                search_provider=FakeSearchProvider(),
+                weather_provider=FakeWeatherProvider(),
+            ),
             tracer=tracer,
             **kwargs,
         )
         return runtime, store, tmp_path / "traces.jsonl"
 
     return build
-

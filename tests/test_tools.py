@@ -60,3 +60,30 @@ def test_duplicate_registration_is_rejected():
     with pytest.raises(ValueError, match="already registered"):
         registry.register(definition)
 
+
+def test_unexpected_handler_error_does_not_leak_secret(tmp_path):
+    store = SessionStore(tmp_path / "secret.db")
+    store.ensure_session("user-a", "window-1")
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            "explode",
+            "raise an internal exception",
+            {"type": "object"},
+            lambda arguments, context: (_ for _ in ()).throw(
+                RuntimeError("internal sk-this-secret-must-not-leak")
+            ),
+        )
+    )
+
+    result = registry.execute(
+        call_id="call-secret",
+        name="explode",
+        arguments={},
+        context=ToolContext("user-a", "window-1", "trace-secret", 1, store),
+        tracer=TraceRecorder(tmp_path / "secret-trace.jsonl"),
+    )
+
+    assert result.is_error is True
+    assert json.loads(result.content)["error_code"] == "tool_execution_error"
+    assert "sk-this-secret" not in result.content
