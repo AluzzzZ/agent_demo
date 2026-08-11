@@ -164,3 +164,17 @@ docs/                       # 问题解决记录与录屏脚本
 参考仓库是 MIT License；归属与许可文本见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。AI Prompt、问题与取舍记录见 [docs/AI_PROMPTS_AND_NOTES.md](docs/AI_PROMPTS_AND_NOTES.md)。
 
 最终交付前仍需由提交者完成真实 Key smoke、录屏与远程仓库推送，见 [docs/SUBMISSION_CHECKLIST.md](docs/SUBMISSION_CHECKLIST.md)。
+
+## Pull Request 与 Codex Review
+
+日常改动从功能分支提交，不直接写入 `main`：
+
+```powershell
+git switch -c feat/your-change
+# 修改并测试
+git push -u origin feat/your-change
+```
+
+随后在 GitHub 创建目标为 `main` 的 Pull Request。PR 模板会检查测试、Session 隔离、工具调用配对与密钥安全；根目录 [AGENTS.md](AGENTS.md) 中的 `## Code Review Rules` 为 Codex 提供仓库级审查规则。
+
+要让 Codex 返回 GitHub PR 审查状态，需要先为仓库配置 Codex cloud，并在 Codex 设置中开启 Code review。未启用自动审查时，可在 PR 评论中发送 `@codex review`。配置方法见 [OpenAI 官方 GitHub Code Review 文档](https://learn.chatgpt.com/docs/third-party/github)。
