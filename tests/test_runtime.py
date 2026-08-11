@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import json
+
+from minimal_agent.storage import SessionStore
+
+from .fakes import RepeatingToolLLM, ScriptedLLM, text_response, tool_response
+
+
+def test_direct_chat_returns_without_tool(runtime_factory):
+    llm = ScriptedLLM([text_response("你好，我可以直接回答。")])
+    runtime, _, _ = runtime_factory(llm)
+
+    result = runtime.run(user_id="user-a", session_id="window-1", user_input="你好")
+
+    assert result.answer == "你好，我可以直接回答。"
+    assert result.iterations == 1
+    assert result.exit_reason == "final_answer"
+    assert {tool["name"] for tool in llm.calls[0]["tools"]} == {
+        "calculator",
+        "search",
+        "weather",
+        "todo",
+    }
+
+
+def test_calculator_tool_result_is_fed_back_to_model(runtime_factory):
+    llm = ScriptedLLM(
+        [
+            tool_response(("calc-1", "calculator", {"expression": "2 + 3 * 4"})),
+            text_response("结果是 14。"),
+        ]
+    )
+    runtime, _, _ = runtime_factory(llm)
+
+    result = runtime.run(
+        user_id="user-a", session_id="window-1", user_input="计算 2+3*4"
+    )
+
+    tool_result = llm.calls[1]["messages"][-1]["content"][0]
+    assert json.loads(tool_result["content"])["result"] == 14
+    assert result.answer == "结果是 14。"
+    assert result.iterations == 2
+
+
+def test_multiple_tools_in_one_turn_and_session_todo(runtime_factory):
+    llm = ScriptedLLM(
+        [
+            tool_response(
+                ("weather-1", "weather", {"city": "上海"}),
+                ("todo-1", "todo", {"action": "add", "title": "下班带伞"}),
+                text="我会查天气并记录待办。",
+            ),
+            text_response("上海今天多云，已记录“下班带伞”。"),
+        ]
+    )
+    runtime, store, _ = runtime_factory(llm)
+
+    result = runtime.run(
+        user_id="user-a",
+        session_id="window-1",
+        user_input="查上海天气并提醒我下班带伞",
+    )
+
+    assert result.iterations == 2
+    assert store.list_todos("user-a", "window-1")[0]["title"] == "下班带伞"
+    assert "我会查天气" in json.dumps(
+        store.get_messages("user-a", "window-1")[1].content, ensure_ascii=False
+    )
+
+
+def test_two_windows_are_isolated_and_survive_store_restart(runtime_factory, tmp_path):
+    llm = ScriptedLLM(
+        [
+            tool_response(("t1", "todo", {"action": "add", "title": "窗口一待办"})),
+            text_response("窗口一已记录。"),
+            tool_response(("t2", "todo", {"action": "add", "title": "窗口二待办"})),
+            text_response("窗口二已记录。"),
+        ]
+    )
+    runtime, store, _ = runtime_factory(llm)
+
+    runtime.run(user_id="user-a", session_id="window-1", user_input="记待办一")
+    runtime.run(user_id="user-a", session_id="window-2", user_input="记待办二")
+
+    assert [item["title"] for item in store.list_todos("user-a", "window-1")] == [
+        "窗口一待办"
+    ]
+    assert [item["title"] for item in store.list_todos("user-a", "window-2")] == [
+        "窗口二待办"
+    ]
+    reopened = SessionStore(tmp_path / "agent.db")
+    assert reopened.list_todos("user-a", "window-1")[0]["title"] == "窗口一待办"
+
+
+def test_tool_follow_up_receives_same_session_history(runtime_factory):
+    llm = ScriptedLLM(
+        [
+            tool_response(("w1", "weather", {"city": "上海", "day": "today"})),
+            text_response("上海今天 30°C，多云。"),
+            tool_response(("w2", "weather", {"city": "上海", "day": "tomorrow"})),
+            text_response("上海明天 31°C，有阵雨。"),
+        ]
+    )
+    runtime, _, _ = runtime_factory(llm)
+
+    runtime.run(user_id="user-a", session_id="weather", user_input="上海今天天气？")
+    result = runtime.run(user_id="user-a", session_id="weather", user_input="那明天呢？")
+
+    follow_up_context = json.dumps(llm.calls[2]["messages"], ensure_ascii=False)
+    assert "temperature_c" in follow_up_context
+    assert "那明天呢" in follow_up_context
+    assert result.answer == "上海明天 31°C，有阵雨。"
+
+
+def test_plain_chat_follow_up_receives_previous_turn(runtime_factory):
+    llm = ScriptedLLM(
+        [text_response("我叫小明，喜欢蓝色。"), text_response("你刚才说喜欢蓝色。")]
+    )
+    runtime, _, _ = runtime_factory(llm)
+
+    runtime.run(user_id="user-a", session_id="chat", user_input="我叫小明，喜欢蓝色")
+    result = runtime.run(user_id="user-a", session_id="chat", user_input="我喜欢什么颜色？")
+
+    second_context = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
+    assert "喜欢蓝色" in second_context
+    assert "我喜欢什么颜色" in second_context
+    assert result.answer == "你刚才说喜欢蓝色。"
+
+
+def test_unknown_tool_error_is_returned_to_llm(runtime_factory):
+    llm = ScriptedLLM(
+        [tool_response(("bad-1", "not_registered", {})), text_response("工具不存在。")]
+    )
+    runtime, _, _ = runtime_factory(llm)
+
+    runtime.run(user_id="user-a", session_id="window-1", user_input="调用未知工具")
+
+    result_block = llm.calls[1]["messages"][-1]["content"][0]
+    assert result_block["is_error"] is True
+    assert "unknown tool" in result_block["content"]
+
+
+def test_max_iterations_stops_infinite_tool_loop(runtime_factory):
+    llm = RepeatingToolLLM()
+    runtime, _, trace_path = runtime_factory(llm, max_iterations=2)
+
+    result = runtime.run(user_id="user-a", session_id="loop", user_input="一直计算")
+
+    assert result.exit_reason == "max_iterations"
+    assert result.iterations == 2
+    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["exit_reason"] == "max_iterations"
+    assert sum(event["event"] == "tool_finished" for event in events) == 2
+
+
+def test_long_context_is_compacted_and_recalled_in_system(runtime_factory):
+    long_answer = "这是很长的回答。" * 30
+    llm = ScriptedLLM(
+        [
+            text_response(long_answer),
+            text_response(long_answer),
+            text_response("我记得前面的摘要。"),
+        ],
+        summary="用户正在测试长会话，早期回答已压缩。",
+    )
+    runtime, store, _ = runtime_factory(
+        llm, context_max_characters=250, keep_recent_messages=2
+    )
+
+    runtime.run(user_id="user-a", session_id="compact", user_input="第一轮长对话")
+    runtime.run(user_id="user-a", session_id="compact", user_input="第二轮长对话")
+    runtime.run(user_id="user-a", session_id="compact", user_input="还记得吗？")
+
+    summary, through_id = store.get_memory("user-a", "compact")
+    assert llm.summary_calls
+    assert summary == "用户正在测试长会话，早期回答已压缩。"
+    assert through_id > 0
+    assert "session_summary" in llm.calls[-1]["system"]
+    assert summary in llm.calls[-1]["system"]
+
+
+def test_trace_contains_complete_request_chain(runtime_factory):
+    llm = ScriptedLLM(
+        [
+            tool_response(("s1", "search", {"query": "session"})),
+            text_response("找到 Session 隔离指南。"),
+        ]
+    )
+    runtime, _, trace_path = runtime_factory(llm)
+
+    result = runtime.run(user_id="user-a", session_id="trace", user_input="搜索 session")
+
+    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert {event["trace_id"] for event in events} == {result.trace_id}
+    assert [event["event"] for event in events] == [
+        "request_started",
+        "llm_started",
+        "llm_finished",
+        "tool_started",
+        "tool_finished",
+        "llm_started",
+        "llm_finished",
+        "request_finished",
+    ]
