@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-total-tokens", type=int, default=None)
     parser.add_argument("--context-max-tokens", type=int, default=6_000)
     parser.add_argument("--context-window-tokens", type=int, default=32_768)
+    parser.add_argument("--keep-recent-turns", type=int, default=4)
     parser.add_argument(
         "--db", default=os.getenv("AGENT_DB_PATH", str(Path("data") / "agent.db"))
     )
@@ -62,6 +63,7 @@ def main() -> None:
         max_total_tokens=args.max_total_tokens,
         context_max_tokens=args.context_max_tokens,
         context_window_tokens=args.context_window_tokens,
+        keep_recent_turns=args.keep_recent_turns,
     )
 
     if args.once:

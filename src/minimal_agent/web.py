@@ -74,6 +74,7 @@ def create_app(
             "max_iterations": int(os.getenv("AGENT_MAX_ITERATIONS", "8")),
             "max_tool_calls": int(os.getenv("AGENT_MAX_TOOL_CALLS", "24")),
             "context_max_tokens": int(os.getenv("AGENT_CONTEXT_MAX_TOKENS", "6000")),
+            "keep_recent_turns": int(os.getenv("AGENT_KEEP_RECENT_TURNS", "4")),
         }
 
     @app.post("/api/auth/login")
@@ -260,6 +261,7 @@ def _build_runtime(store: SessionStore, tracer: TraceRecorder) -> AgentRuntime:
         context_max_tokens=int(os.getenv("AGENT_CONTEXT_MAX_TOKENS", "6000")),
         context_window_tokens=int(os.getenv("AGENT_CONTEXT_WINDOW_TOKENS", "32768")),
         reserved_output_tokens=int(os.getenv("AGENT_RESERVED_OUTPUT_TOKENS", "2048")),
+        keep_recent_turns=int(os.getenv("AGENT_KEEP_RECENT_TURNS", "4")),
         full_tool_catalog_threshold=int(
             os.getenv("AGENT_FULL_TOOL_CATALOG_THRESHOLD", "12")
         ),

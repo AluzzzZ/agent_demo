@@ -38,11 +38,14 @@ class ContextManager:
         max_tokens: int = 6_000,
         context_window_tokens: int = 32_768,
         reserved_output_tokens: int = 2_048,
-        keep_recent_messages: int = 8,
+        keep_recent_turns: int = 4,
+        keep_recent_messages: int | None = None,
         max_tool_result_tokens: int = 800,
         legacy_max_characters: int | None = None,
     ) -> None:
-        if keep_recent_messages < 2:
+        if keep_recent_turns < 1:
+            raise ValueError("keep_recent_turns must be at least 1")
+        if keep_recent_messages is not None and keep_recent_messages < 2:
             raise ValueError("keep_recent_messages must be at least 2")
         if max_tokens < 128:
             raise ValueError("max_tokens must be at least 128")
@@ -53,6 +56,9 @@ class ContextManager:
         self.max_tokens = max_tokens
         self.context_window_tokens = context_window_tokens
         self.reserved_output_tokens = reserved_output_tokens
+        self.keep_recent_turns = keep_recent_turns
+        # Compatibility for callers that still configure the old message-count
+        # policy. New callers preserve complete user turns instead.
         self.keep_recent_messages = keep_recent_messages
         self.max_tool_result_tokens = max_tool_result_tokens
         self.legacy_max_characters = legacy_max_characters
@@ -78,18 +84,12 @@ class ContextManager:
         )
         should_compact = force_compaction or window.budget.exceeds_soft_limit or legacy_overflow
         if should_compact and len(messages) > 2:
-            preserve_count = (
-                max(2, self.keep_recent_messages // 2)
-                if force_compaction
-                else self.keep_recent_messages
-            )
             previous_through_id = through_id
             summary, through_id = self._compact(
                 user_id=user_id,
                 session_id=session_id,
                 previous_summary=summary,
                 messages=messages,
-                preserve_count=preserve_count,
                 trace_id=trace_id,
                 tracer=tracer,
             )
@@ -127,8 +127,9 @@ class ContextManager:
         session_id: str,
         tools: list[dict[str, Any]],
     ) -> ContextWindow:
+        protected_tail = len(messages) - self._preserved_tail_start(messages)
         view_messages, snipped_count, saved_tokens = self._snip_tool_results(
-            messages, protected_tail=self.keep_recent_messages
+            messages, protected_tail=protected_tail
         )
         todos = self.store.list_todos(user_id, session_id)
         memory_sections = []
@@ -170,12 +171,10 @@ class ContextManager:
         session_id: str,
         previous_summary: str,
         messages: list[StoredMessage],
-        preserve_count: int,
         trace_id: str,
         tracer: TraceRecorder,
     ) -> tuple[str, int]:
-        cut = len(messages) - preserve_count
-        cut = self._safe_cut(messages, cut)
+        cut = self._preserved_tail_start(messages)
         if cut <= 0:
             return previous_summary, messages[0].id - 1
 
@@ -238,9 +237,48 @@ class ContextManager:
             method=method,
             messages_compacted=len(old_messages),
             preserved_messages=len(messages) - len(old_messages),
+            preserved_turns=self._count_user_turns(messages[cut:]),
             through_message_id=through_id,
         )
         return summary, through_id
+
+    def _preserved_tail_start(self, messages: list[StoredMessage]) -> int:
+        """Return the start of the recent complete-turn tail.
+
+        A user turn starts at an external user message. Internal user messages
+        containing only ``tool_result`` blocks remain attached to that turn, as
+        do all intermediate assistant tool calls and the final assistant answer.
+        """
+
+        if not messages:
+            return 0
+        if self.keep_recent_messages is not None:
+            proposed = max(len(messages) - self.keep_recent_messages, 0)
+            return self._safe_cut(messages, proposed)
+
+        starts = [
+            index
+            for index, message in enumerate(messages)
+            if self._is_external_user_message(message)
+        ]
+        if len(starts) <= self.keep_recent_turns:
+            return 0
+        return starts[-self.keep_recent_turns]
+
+    @classmethod
+    def _count_user_turns(cls, messages: list[StoredMessage]) -> int:
+        return sum(cls._is_external_user_message(message) for message in messages)
+
+    @staticmethod
+    def _is_external_user_message(message: StoredMessage) -> bool:
+        if message.role != "user":
+            return False
+        if not isinstance(message.content, list):
+            return True
+        return not message.content or not all(
+            isinstance(block, dict) and block.get("type") == "tool_result"
+            for block in message.content
+        )
 
     def _snip_tool_results(
         self, messages: list[StoredMessage], *, protected_tail: int

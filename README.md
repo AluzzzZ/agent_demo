@@ -4,9 +4,7 @@
 
 代码仓库：[github.com/AluzzzZ/agent_demo](https://github.com/AluzzzZ/agent_demo)
 
-## 完成度
-
-| 题目要求 | 实现位置 |
+| 要求 | 实现位置 |
 |---|---|
 | LLM → 工具 → LLM 基本循环 | `runtime.py` |
 | LLM 按 Schema 自主调用工具 | `tools/registry.py` |
@@ -39,7 +37,7 @@ minimal-agent --user user-a --session window-1
 
 ## Web 工作台
 
-启动 Codex 风格的本地 Web 工作台：
+启动本地 Web 工作台：
 
 ```powershell
 python -m minimal_agent.web
@@ -138,7 +136,7 @@ Registry 负责重名检查、JSON Schema 合法性、调用参数校验、统�
 
 召回发生在每次 LLM 调用之前。短期消息以 Provider-neutral block 放入 `messages`，DashScope Adapter 再转换为 OpenAI 的 `assistant.tool_calls` 和 `tool` 消息；长期摘要和 Todo 以明确标签放入 `system` 的当前会话记忆区。原始历史始终保留在 SQLite，仅发送给模型的 Context 视图会被裁剪或压缩。
 
-预算同时计算 System Prompt、消息、Todo/摘要、工具 Schema，并预留模型输出空间。达到软上限时先裁剪较早的大型工具结果，再保留最近若干完整消息并摘要更早的完整轮次；切分点不会拆开 `tool_use` 与 `tool_result`。摘要失败时使用有界本地降级，连续三次失败后打开熔断。若供应商仍报告上下文过长，Runtime 会强制压缩并只重试一次。
+预算同时计算 System Prompt、消息、Todo/摘要、工具 Schema，并预留模型输出空间。达到软上限时先裁剪较早的大型工具结果，再默认保留最近约 4 个完整用户轮次并摘要更早历史。一个完整轮次包括用户输入、模型工具调用、全部工具结果和最终回答，不会在工具链中间切断。摘要失败时使用有界本地降级，连续三次失败后打开熔断。若供应商仍报告上下文过长，Runtime 会强制压缩并只重试一次。保留轮数可通过 `AGENT_KEEP_RECENT_TURNS` 调整。
 
 默认工具较少时全量提供 Schema；注册工具超过阈值后，Runtime 根据工具名称、描述和 `routing_hints` 选择 Top-K，并始终保留 `tool_search`。目录搜索得到的工具会在下一轮激活。`context_preflight` Trace 会显示消息、System、Schema、输出预留及软硬上限的 Token 估算。
 
@@ -201,11 +199,4 @@ src/minimal_agent/
 ├── llm/anthropic_client.py # 可选 Anthropic Provider
 └── tools/                  # Registry、四个业务工具与 tool_search
 tests/                      # Fake LLM 单测 + opt-in 真实 smoke
-docs/                       # 问题解决记录与录屏脚本
 ```
-
-## 参考仓库与复用边界
-
-本轮重点审阅了 [HarnessLab/claw-code-agent](https://github.com/HarnessLab/claw-code-agent) 的有界 Agent Loop、分层 Context 压缩、Search Provider、Session 恢复和运行 Trace。当前项目保留自身更适合多用户场景的 `(user_id, session_id)` SQLite 结构，只借鉴公开架构思想并自行实现，没有整体替换 Runtime，也没有直接复制其源码。
-
-审阅固定提交、能力映射、许可风险、复用决策和后续生产化阶段见 [docs/CLAW_CODE_AGENT_REUSE_PLAN.md](docs/CLAW_CODE_AGENT_REUSE_PLAN.md)。项目早期参考资料与归属信息仍见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，问题与取舍记录见 [docs/AI_PROMPTS_AND_NOTES.md](docs/AI_PROMPTS_AND_NOTES.md)。

@@ -181,6 +181,60 @@ def test_long_context_is_compacted_and_recalled_in_system(runtime_factory):
     assert summary in llm.calls[-1]["system"]
 
 
+def test_compaction_preserves_four_complete_turns_including_tool_chains(runtime_factory):
+    responses = []
+    for index in range(1, 6):
+        responses.extend(
+            [
+                tool_response(
+                    (f"calc-{index}", "calculator", {"expression": f"{index} + 1"})
+                ),
+                text_response(f"第 {index} 轮结果是 {index + 1}。"),
+            ]
+        )
+    llm = ScriptedLLM(responses, summary="第 1 轮已压缩。")
+    runtime, store, _ = runtime_factory(
+        llm,
+        context_max_characters=1_000_000,
+        context_max_tokens=128,
+        context_window_tokens=8_192,
+        reserved_output_tokens=512,
+        keep_recent_turns=4,
+    )
+
+    for index in range(1, 6):
+        runtime.run(
+            user_id="user-a",
+            session_id="four-turns",
+            user_input=f"第 {index} 轮，请计算 {index} + 1",
+        )
+
+    summary, through_id = store.get_memory("user-a", "four-turns")
+    remaining = store.get_messages("user-a", "four-turns", after_id=through_id)
+    external_user_messages = [
+        message
+        for message in remaining
+        if message.role == "user" and isinstance(message.content, str)
+    ]
+
+    assert summary == "第 1 轮已压缩。"
+    assert [message.content for message in external_user_messages] == [
+        "第 2 轮，请计算 2 + 1",
+        "第 3 轮，请计算 3 + 1",
+        "第 4 轮，请计算 4 + 1",
+        "第 5 轮，请计算 5 + 1",
+    ]
+    assert sum(
+        1
+        for message in remaining
+        if isinstance(message.content, list)
+        and any(
+            isinstance(block, dict) and block.get("type") == "tool_result"
+            for block in message.content
+        )
+    ) == 4
+
+
 def test_trace_contains_complete_request_chain(runtime_factory):
     llm = ScriptedLLM(
         [
