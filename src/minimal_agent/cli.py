@@ -29,6 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="DashScope native /api/v1 or OpenAI-compatible base URL",
     )
     parser.add_argument("--max-iterations", type=int, default=8)
+    parser.add_argument("--max-tool-calls", type=int, default=24)
+    parser.add_argument("--max-total-tokens", type=int, default=None)
+    parser.add_argument("--context-max-tokens", type=int, default=6_000)
+    parser.add_argument("--context-window-tokens", type=int, default=32_768)
     parser.add_argument(
         "--db", default=os.getenv("AGENT_DB_PATH", str(Path("data") / "agent.db"))
     )
@@ -54,6 +58,10 @@ def main() -> None:
         tools=create_default_registry(),
         tracer=TraceRecorder(args.trace),
         max_iterations=args.max_iterations,
+        max_tool_calls=args.max_tool_calls,
+        max_total_tokens=args.max_total_tokens,
+        context_max_tokens=args.context_max_tokens,
+        context_window_tokens=args.context_window_tokens,
     )
 
     if args.once:

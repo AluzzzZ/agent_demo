@@ -21,6 +21,7 @@ def test_direct_chat_returns_without_tool(runtime_factory):
         "search",
         "weather",
         "todo",
+        "tool_search",
     }
 
 
@@ -193,13 +194,61 @@ def test_trace_contains_complete_request_chain(runtime_factory):
 
     events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
     assert {event["trace_id"] for event in events} == {result.trace_id}
-    assert [event["event"] for event in events] == [
-        "request_started",
-        "llm_started",
-        "llm_finished",
-        "tool_started",
-        "tool_finished",
-        "llm_started",
-        "llm_finished",
-        "request_finished",
-    ]
+    event_names = [event["event"] for event in events]
+    assert event_names[0] == "request_started"
+    assert event_names[-1] == "request_finished"
+    assert event_names.count("tool_schema_selected") == 2
+    assert event_names.count("context_preflight") == 2
+    assert event_names.count("llm_started") == 2
+    assert event_names.count("llm_finished") == 2
+    assert event_names.count("tool_started") == 1
+    assert event_names.count("tool_finished") == 1
+    preflight = next(event for event in events if event["event"] == "context_preflight")
+    assert preflight["tool_schema_tokens"] > 0
+
+
+def test_model_timeout_returns_safe_failure_instead_of_raising(runtime_factory):
+    class TimeoutLLM:
+        def complete(self, *, system, messages, tools):
+            raise TimeoutError("provider timed out with internal details")
+
+        def summarize(self, *, previous_summary, transcript):
+            return "summary"
+
+    runtime, store, trace_path = runtime_factory(TimeoutLLM())
+
+    result = runtime.run(user_id="user-a", session_id="failure", user_input="你好")
+
+    assert result.exit_reason == "model_timeout"
+    assert "超时" in result.answer
+    assert "internal details" not in result.answer
+    assert store.get_messages("user-a", "failure")[-1].role == "assistant"
+    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["event"] == "request_failed"
+    assert events[-1]["error_code"] == "model_timeout"
+
+
+def test_context_too_long_runs_one_reactive_compaction_retry(runtime_factory):
+    class RetryLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, messages, tools):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("context_length_exceeded: prompt is too long")
+            return text_response("压缩重试成功。")
+
+        def summarize(self, *, previous_summary, transcript):
+            return "summary"
+
+    llm = RetryLLM()
+    runtime, _, trace_path = runtime_factory(llm)
+
+    result = runtime.run(user_id="user-a", session_id="retry", user_input="继续")
+
+    assert result.answer == "压缩重试成功。"
+    assert llm.calls == 2
+    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert sum(event["event"] == "context_reactive_compaction" for event in events) == 1
+    assert sum(event["event"] == "llm_started" for event in events) == 2

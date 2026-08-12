@@ -77,6 +77,21 @@ class SessionStore:
                 CREATE INDEX IF NOT EXISTS idx_todos_session
                     ON todos(user_id, session_id, id);
 
+                CREATE TABLE IF NOT EXISTS tool_executions (
+                    user_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    call_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    arguments_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, session_id, call_id),
+                    FOREIGN KEY (user_id, session_id)
+                        REFERENCES sessions(user_id, session_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_tool_executions_session
+                    ON tool_executions(user_id, session_id, created_at);
+
                 CREATE TABLE IF NOT EXISTS app_users (
                     user_id TEXT PRIMARY KEY,
                     username TEXT NOT NULL UNIQUE,
@@ -254,6 +269,58 @@ class SessionStore:
                 """,
                 (summary, through_message_id, user_id, session_id),
             )
+
+    def get_tool_execution(
+        self, user_id: str, session_id: str, call_id: str
+    ) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT tool_name, arguments_hash, result_json
+                FROM tool_executions
+                WHERE user_id = ? AND session_id = ? AND call_id = ?
+                """,
+                (user_id, session_id, call_id),
+            ).fetchone()
+        if row is None:
+            return None
+        result = json.loads(row["result_json"])
+        return {
+            "tool_name": row["tool_name"],
+            "arguments_hash": row["arguments_hash"],
+            "result": result,
+        }
+
+    def save_tool_execution(
+        self,
+        user_id: str,
+        session_id: str,
+        call_id: str,
+        *,
+        tool_name: str,
+        arguments_hash: str,
+        result: dict[str, Any],
+    ) -> bool:
+        """Persist a completed call; return False when another call already won."""
+
+        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO tool_executions(
+                    user_id, session_id, call_id, tool_name, arguments_hash, result_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    session_id,
+                    call_id,
+                    tool_name,
+                    arguments_hash,
+                    encoded,
+                ),
+            )
+        return cursor.rowcount > 0
 
     def add_todo(self, user_id: str, session_id: str, title: str) -> dict[str, Any]:
         clean_title = title.strip()

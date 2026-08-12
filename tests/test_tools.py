@@ -87,3 +87,72 @@ def test_unexpected_handler_error_does_not_leak_secret(tmp_path):
     assert result.is_error is True
     assert json.loads(result.content)["error_code"] == "tool_execution_error"
     assert "sk-this-secret" not in result.content
+
+
+def test_completed_tool_call_is_replayed_without_duplicate_side_effect(tmp_path):
+    store = SessionStore(tmp_path / "replay.db")
+    store.ensure_session("user-a", "window-1")
+    registry = create_default_registry()
+    tracer = TraceRecorder(tmp_path / "replay.jsonl")
+    context = ToolContext("user-a", "window-1", "trace-1", 1, store)
+
+    first = registry.execute(
+        call_id="todo-stable-id",
+        name="todo",
+        arguments={"action": "add", "title": "只添加一次"},
+        context=context,
+        tracer=tracer,
+    )
+    replay = registry.execute(
+        call_id="todo-stable-id",
+        name="todo",
+        arguments={"action": "add", "title": "只添加一次"},
+        context=context,
+        tracer=tracer,
+    )
+
+    assert replay == first
+    assert len(store.list_todos("user-a", "window-1")) == 1
+    events = tracer.read_events(user_id="user-a", trace_id="trace-1")
+    assert events[-1]["event"] == "tool_replayed"
+
+
+def test_large_tool_catalog_routes_schemas_and_keeps_catalog_search():
+    registry = ToolRegistry()
+    for index in range(15):
+        registry.register(
+            ToolDefinition(
+                f"dummy_{index}",
+                f"第 {index} 个无关工具",
+                {"type": "object"},
+                lambda arguments, context: arguments,
+                routing_hints=(f"能力{index}",),
+            )
+        )
+    registry.register(
+        ToolDefinition(
+            "weather_lookup",
+            "查询真实天气",
+            {"type": "object"},
+            lambda arguments, context: arguments,
+            routing_hints=("天气", "气温"),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            "tool_search",
+            "搜索工具目录",
+            {"type": "object"},
+            lambda arguments, context: arguments,
+            always_available=True,
+        )
+    )
+
+    selection = registry.select(
+        "帮我查询上海天气", full_catalog_threshold=12, max_selected=4
+    )
+
+    assert selection.strategy == "routed"
+    assert "weather_lookup" in selection.names
+    assert "tool_search" in selection.names
+    assert len(selection.names) <= 4

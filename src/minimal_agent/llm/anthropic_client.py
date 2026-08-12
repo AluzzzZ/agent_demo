@@ -60,8 +60,9 @@ class AnthropicLLM:
 
     def summarize(self, *, previous_summary: str, transcript: str) -> str:
         prompt = (
-            "把下面的旧会话压缩成可供 Agent 后续使用的简明记忆。"
-            "只保留：用户目标、关键事实、工具结论、约束、待完成事项。"
+            "把下面的旧会话压缩成可供 Agent 后续使用的结构化简明记忆。"
+            "只保留：当前用户目标、已确认事实与偏好、工具结论及来源/查询时间、"
+            "会话约束、待办、未解决问题和继续对话需要的实体。"
             "不要补充原文没有的信息，不要记录隐藏推理。\n\n"
             f"已有摘要：\n{previous_summary or '（无）'}\n\n"
             f"待压缩会话：\n{transcript}"

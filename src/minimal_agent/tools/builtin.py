@@ -82,6 +82,7 @@ def create_default_registry(
         ToolDefinition(
             name="calculator",
             description="安全计算一个只包含数字、括号和基本算术运算符的表达式。",
+            routing_hints=("计算", "算一下", "数学", "加", "减", "乘", "除"),
             input_schema={
                 "type": "object",
                 "properties": {"expression": {"type": "string"}},
@@ -98,6 +99,7 @@ def create_default_registry(
                 "使用免费的 Wikipedia/MediaWiki API 搜索百科知识，返回标题、摘要和地址。"
                 "它不覆盖整个互联网；需要百科事实或背景资料时使用。"
             ),
+            routing_hints=("搜索", "查资料", "百科", "资料", "search", "Wikipedia"),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -122,6 +124,7 @@ def create_default_registry(
                 "使用免费的 Open-Meteo API 查询城市今天或明天的真实天气预报。"
                 "结果包含最高/最低温度、天气状况和最大降水概率。"
             ),
+            routing_hints=("天气", "气温", "下雨", "降水", "预报", "weather"),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -143,6 +146,7 @@ def create_default_registry(
                 "管理当前窗口独立的待办。action=add 时传 title；"
                 "action=complete 时传 todo_id；action=list 无需额外参数。"
             ),
+            routing_hints=("待办", "提醒", "任务", "记一下", "todo"),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -154,6 +158,32 @@ def create_default_registry(
                 "additionalProperties": False,
             },
             handler=todo,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="tool_search",
+            description=(
+                "搜索工具目录。仅当当前提供的工具不足以完成任务时调用；"
+                "匹配到的工具会在下一轮获得完整 Schema。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=lambda arguments, _: {
+                "matches": registry.search_catalog(
+                    arguments["query"], limit=arguments.get("limit", 8)
+                ),
+                "instruction": "匹配工具将在下一轮激活，请继续完成原任务。",
+            },
+            routing_hints=("工具", "能力", "tool"),
+            always_available=True,
         )
     )
     return registry

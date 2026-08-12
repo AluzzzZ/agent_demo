@@ -575,7 +575,7 @@ async function loadTrace(traceId) {
   els.traceEvents.replaceChildren();
   for (const event of events) {
     const card = document.createElement("div");
-    const category = event.event.includes("tool") ? "tool" : event.event.includes("llm") ? "llm" : event.event.includes("failed") || event.status === "error" ? "error" : "";
+    const category = event.event.includes("failed") || event.status === "error" ? "error" : event.event.includes("tool") ? "tool" : event.event.includes("llm") ? "llm" : "";
     card.className = `trace-event ${category}`;
     const head = document.createElement("div"); head.className = "trace-event-head";
     const name = document.createElement("span"); name.className = "trace-event-name"; name.textContent = `${event.sequence_no || "·"}. ${event.event}`;
@@ -588,6 +588,15 @@ async function loadTrace(traceId) {
     if (event.status) parts.push(`status=${event.status}`);
     if (event.error_code) parts.push(`error=${event.error_code}`);
     if (event.context_characters) parts.push(`context=${event.context_characters} chars`);
+    if (event.projected_input_tokens != null) parts.push(`prompt≈${event.projected_input_tokens} tokens`);
+    if (event.tool_schema_tokens != null) parts.push(`schemas≈${event.tool_schema_tokens} tokens`);
+    if (event.soft_input_limit_tokens != null) parts.push(`soft=${event.soft_input_limit_tokens}`);
+    if (event.hard_input_limit_tokens != null) parts.push(`hard=${event.hard_input_limit_tokens}`);
+    if (event.active_tool_count != null) parts.push(`active_tools=${event.active_tool_count}`);
+    if (event.retry_attempt) parts.push(`retry=${event.retry_attempt}`);
+    if (event.messages_compacted != null) parts.push(`compacted=${event.messages_compacted}`);
+    if (event.messages_snipped != null) parts.push(`snipped=${event.messages_snipped}`);
+    if (Array.isArray(event.active_tools) && event.active_tools.length) parts.push(`tools=[${event.active_tools.join(", ")}]`);
     if (parts.length) { const meta = document.createElement("div"); meta.className = "trace-event-meta"; meta.textContent = parts.join(" · "); card.append(meta); }
     els.traceEvents.append(card);
   }
